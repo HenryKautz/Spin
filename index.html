@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Spinner Wheel</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #1e1e2e;
+    color: #eee;
+    margin: 0;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+  }
+  h1 { margin: 0 0 16px; }
+  #controls { margin-bottom: 16px; display: flex; gap: 8px; }
+  button {
+    padding: 10px 24px;
+    font-size: 16px;
+    font-weight: 600;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    background: #5b6cff;
+    color: white;
+    transition: background 0.15s, transform 0.05s;
+  }
+  button:hover:not(:disabled) { background: #7587ff; }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button:disabled { background: #444; color: #888; cursor: not-allowed; }
+  #okayBtn { background: #ffb454; color: #1e1e2e; }
+  #okayBtn:hover { background: #ffc77a; }
+
+  #loadPanel {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+    background: #2a2a3e;
+    padding: 16px;
+    border-radius: 8px;
+  }
+  #loadPanel.open { display: flex; }
+  #namesInput {
+    width: 360px;
+    height: 220px;
+    padding: 10px;
+    font-family: monospace;
+    font-size: 14px;
+    background: #1e1e2e;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 4px;
+    resize: vertical;
+  }
+
+  #wheelContainer {
+    position: relative;
+    width: 560px;
+    height: 560px;
+  }
+  canvas { display: block; }
+
+  #pointer {
+    position: absolute;
+    top: 50%;
+    right: 0;
+    transform: translateY(-50%);
+    width: 0;
+    height: 0;
+    border-top: 18px solid transparent;
+    border-bottom: 18px solid transparent;
+    border-right: 36px solid #e74c3c;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+    transform-origin: right center;
+    transition: transform 0.04s ease-out;
+  }
+  #pointer.tick {
+    transform: translateY(-50%) rotate(-15deg);
+  }
+
+  #status {
+    margin-top: 16px;
+    min-height: 28px;
+    font-size: 18px;
+    font-weight: 600;
+  }
+</style>
+</head>
+<body>
+  <h1>Spinner Wheel</h1>
+
+  <div id="controls">
+    <button id="loadBtn">LOAD</button>
+    <button id="spinBtn" disabled>SPIN</button>
+    <button id="okayBtn" style="display:none">OKAY</button>
+  </div>
+
+  <div id="loadPanel">
+    <textarea id="namesInput" placeholder="Paste names here, one per line..."></textarea>
+    <div style="display:flex; gap:8px;">
+      <button id="applyNamesBtn">Apply</button>
+      <button id="cancelNamesBtn" style="background:#666;">Cancel</button>
+    </div>
+  </div>
+
+  <div id="wheelContainer">
+    <canvas id="wheel" width="560" height="560"></canvas>
+    <div id="pointer"></div>
+  </div>
+
+  <div id="status"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('wheel');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cx = W / 2, cy = H / 2;
+  const radius = Math.min(W, H) / 2 - 30;
+
+  const loadBtn = document.getElementById('loadBtn');
+  const spinBtn = document.getElementById('spinBtn');
+  const okayBtn = document.getElementById('okayBtn');
+  const loadPanel = document.getElementById('loadPanel');
+  const namesInput = document.getElementById('namesInput');
+  const applyBtn = document.getElementById('applyNamesBtn');
+  const cancelBtn = document.getElementById('cancelNamesBtn');
+  const pointerEl = document.getElementById('pointer');
+  const statusEl = document.getElementById('status');
+
+  const DEFAULT_NAMES = [
+    'Janice Guo',
+    'Nathan Todd',
+    'Tejas Venu',
+    'Kaixuan Zhang',
+    'Alejandro Vistorte Salgado',
+    'Albert Huang',
+    'Md Sabbir Ahmed',
+    'Pierce Brookins',
+    'Boyang Yan',
+    'Ben Kessler',
+    'Wenhao X',
+    'Anna Li',
+    'Scarlett Y',
+    'Hriday Sainathuni',
+    'Anup Sinkar',
+    'Ariful Islam',
+    'Shaina Kumar',
+    'Zihao Liang',
+    'Nadia Mehjabin',
+    'Jacob Huynh',
+    'Arafat Rahman',
+  ];
+
+  /** @type {{name: string, color: string, active: boolean}[]} */
+  let segments = [];
+  let rotation = 0;        // current wheel rotation in radians
+  let spinning = false;
+  let winnerIndex = -1;
+  let flashOn = false;
+  let flashTimer = null;
+  let lastSegUnderPointer = -1;
+
+  // --- Audio: synthesized tick ---
+  let audioCtx = null;
+  function ensureAudio() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+  function playTick() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'square';
+    o.frequency.setValueAtTime(1800, t);
+    o.frequency.exponentialRampToValueAtTime(600, t + 0.03);
+    g.gain.setValueAtTime(0.15, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(t);
+    o.stop(t + 0.06);
+  }
+
+  // --- Color generation: distinct random hues ---
+  function generateColors(n) {
+    const colors = [];
+    const start = Math.random() * 360;
+    for (let i = 0; i < n; i++) {
+      const hue = (start + i * (360 / n) + (Math.random() - 0.5) * 20) % 360;
+      const sat = 65 + Math.random() * 20;
+      const light = 50 + Math.random() * 10;
+      colors.push(`hsl(${hue.toFixed(1)}, ${sat.toFixed(1)}%, ${light.toFixed(1)}%)`);
+    }
+    // shuffle so adjacent hues aren't always neighbors
+    for (let i = colors.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [colors[i], colors[j]] = [colors[j], colors[i]];
+    }
+    return colors;
+  }
+
+  function loadNames(names) {
+    const cleaned = names
+      .split('\n')
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+    if (cleaned.length < 2) {
+      alert('Please enter at least 2 names.');
+      return false;
+    }
+    const colors = generateColors(cleaned.length);
+    segments = cleaned.map((name, i) => ({
+      name,
+      color: colors[i],
+      active: true,
+    }));
+    rotation = 0;
+    winnerIndex = -1;
+    stopFlashing();
+    okayBtn.style.display = 'none';
+    spinBtn.disabled = false;
+    statusEl.textContent = '';
+    draw();
+    return true;
+  }
+
+  // --- Drawing ---
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    if (segments.length === 0) {
+      ctx.fillStyle = '#666';
+      ctx.font = '20px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Press LOAD to add names', cx, cy);
+      return;
+    }
+
+    const n = segments.length;
+    const step = (Math.PI * 2) / n;
+
+    for (let i = 0; i < n; i++) {
+      const a0 = i * step + rotation;
+      const a1 = (i + 1) * step + rotation;
+
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, radius, a0, a1);
+      ctx.closePath();
+
+      const seg = segments[i];
+      let fill = seg.color;
+      if (!seg.active) fill = '#555';
+      if (i === winnerIndex && flashOn) fill = '#ffffff';
+
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#1e1e2e';
+      ctx.stroke();
+
+      // Label
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(a0 + step / 2);
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = seg.active ? '#1e1e2e' : '#888';
+      const fontSize = Math.max(10, Math.min(22, 220 / Math.max(8, n)));
+      ctx.font = `bold ${fontSize}px -apple-system, sans-serif`;
+      const label = seg.name.length > 20 ? seg.name.slice(0, 19) + '…' : seg.name;
+      ctx.fillText(label, radius - 12, 0);
+      ctx.restore();
+    }
+
+    // Center hub
+    ctx.beginPath();
+    ctx.arc(cx, cy, 24, 0, Math.PI * 2);
+    ctx.fillStyle = '#1e1e2e';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+  }
+
+  // Which segment is currently under the pointer (right side, angle 0)?
+  function segmentUnderPointer(rot) {
+    const n = segments.length;
+    const step = (Math.PI * 2) / n;
+    // pointer is at world angle 0; effective wheel angle there:
+    let eff = ((-rot) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+    return Math.floor(eff / step) % n;
+  }
+
+  // --- Spinning ---
+  function spin() {
+    if (spinning) return;
+    const activeIndices = segments
+      .map((s, i) => s.active ? i : -1)
+      .filter(i => i >= 0);
+    if (activeIndices.length === 0) {
+      statusEl.textContent = 'No active segments left!';
+      return;
+    }
+    if (activeIndices.length === 1) {
+      // Trivially land on the only active one — still spin for fun.
+    }
+
+    ensureAudio();
+    spinning = true;
+    spinBtn.disabled = true;
+    loadBtn.disabled = true;
+    okayBtn.style.display = 'none';
+    statusEl.textContent = '';
+    stopFlashing();
+    winnerIndex = -1;
+
+    const target = activeIndices[Math.floor(Math.random() * activeIndices.length)];
+    const n = segments.length;
+    const step = (Math.PI * 2) / n;
+
+    // We want segmentUnderPointer(finalRot) === target.
+    // Pick a random angle within target segment for variety.
+    const within = (Math.random() * 0.8 + 0.1) * step; // 10%..90% into segment
+    // We need eff in [target*step, target*step + step), where eff = (-rot) mod 2π
+    // So choose desired eff = target*step + within
+    const desiredEff = target * step + within;
+    // Choose a base final rotation in (-2π, 0]
+    let baseFinal = -desiredEff;
+    // Normalize current rotation modulo 2π
+    const currentMod = ((rotation % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    // We want endRotation > rotation, with endRotation ≡ baseFinal (mod 2π)
+    const startRot = rotation;
+    const fullSpins = 6 + Math.floor(Math.random() * 5); // 6-10 full rotations
+    // Compute end rotation:
+    // endRotation ≡ baseFinal (mod 2π)  i.e.  endRotation = baseFinal + 2π*k
+    // pick k so endRotation - startRot is at least fullSpins*2π
+    const minEnd = startRot + fullSpins * Math.PI * 2;
+    let k = Math.ceil((minEnd - baseFinal) / (Math.PI * 2));
+    const endRot = baseFinal + k * Math.PI * 2;
+
+    const duration = 10000 + Math.random() * 10000; // 10-20 sec
+    const startTime = performance.now();
+
+    lastSegUnderPointer = segmentUnderPointer(rotation);
+
+    function easeOutQuart(t) {
+      return 1 - Math.pow(1 - t, 4);
+    }
+
+    function frame(now) {
+      const elapsed = now - startTime;
+      const t = Math.min(1, elapsed / duration);
+      const eased = easeOutQuart(t);
+      rotation = startRot + (endRot - startRot) * eased;
+
+      const seg = segmentUnderPointer(rotation);
+      if (seg !== lastSegUnderPointer) {
+        playTick();
+        pointerEl.classList.add('tick');
+        setTimeout(() => pointerEl.classList.remove('tick'), 40);
+        lastSegUnderPointer = seg;
+      }
+
+      draw();
+
+      if (t < 1) {
+        requestAnimationFrame(frame);
+      } else {
+        rotation = endRot;
+        draw();
+        finishSpin(target);
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function finishSpin(idx) {
+    spinning = false;
+    winnerIndex = idx;
+    statusEl.textContent = `Winner: ${segments[idx].name}`;
+    startFlashing();
+    okayBtn.style.display = 'inline-block';
+    loadBtn.disabled = false;
+  }
+
+  function startFlashing() {
+    stopFlashing();
+    flashOn = false;
+    flashTimer = setInterval(() => {
+      flashOn = !flashOn;
+      draw();
+    }, 300);
+  }
+
+  function stopFlashing() {
+    if (flashTimer) {
+      clearInterval(flashTimer);
+      flashTimer = null;
+    }
+    flashOn = false;
+  }
+
+  function acceptWinner() {
+    if (winnerIndex < 0) return;
+    segments[winnerIndex].active = false;
+    winnerIndex = -1;
+    stopFlashing();
+    okayBtn.style.display = 'none';
+    statusEl.textContent = '';
+    draw();
+    const remaining = segments.filter(s => s.active).length;
+    if (remaining === 0) {
+      statusEl.textContent = 'All names have been picked!';
+      spinBtn.disabled = true;
+    }
+  }
+
+  // --- Wire up UI ---
+  loadBtn.addEventListener('click', () => {
+    loadPanel.classList.toggle('open');
+    if (loadPanel.classList.contains('open')) {
+      // Pre-fill with current names if any
+      namesInput.value = segments.map(s => s.name).join('\n');
+      namesInput.focus();
+    }
+  });
+
+  applyBtn.addEventListener('click', () => {
+    if (loadNames(namesInput.value)) {
+      loadPanel.classList.remove('open');
+    }
+  });
+
+  cancelBtn.addEventListener('click', () => {
+    loadPanel.classList.remove('open');
+  });
+
+  spinBtn.addEventListener('click', spin);
+  okayBtn.addEventListener('click', acceptWinner);
+
+  loadNames(DEFAULT_NAMES.join('\n'));
+})();
+</script>
+</body>
+</html>
